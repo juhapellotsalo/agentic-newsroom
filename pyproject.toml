@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "agentic-newsroom"
+version = "0.1.0"
+description = "LangGraph-based simulation of a newspaper editorial workflow"
+authors = ["Agentic Newsroom Team"]
+packages = [{include = "agentic_newsroom", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+langgraph = "^1.0.3"
+langchain = "^1.0.5"
+langchain-core = "^1.0.4"
+langchain-openai = "^1.0.2"
+langchain-anthropic = "^1.0.3"
+langchain-community = "^0.3.0"
+pydantic = "^2.0.0"
+python-dotenv = "^1.0.0"
+grandalf = "^0.8"
+tavily-python = "^0.7.13"
+wikipedia = "^1.4.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+black = "^24.0.0"
+ruff = "^0.6.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
