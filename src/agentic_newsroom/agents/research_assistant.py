@@ -1,317 +1,380 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from typing import Literal, Annotated, List, Dict, Any
-from pydantic import BaseModel, Field
-from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
+import logging
+from typing import Literal, List, Optional
+from pydantic import BaseModel
+from langchain_core.messages import SystemMessage, AIMessage
 from langgraph.graph import START, END, StateGraph
 
-from agentic_newsroom.schemas import ResearchState, SearchResult
-from agentic_newsroom.tools.tavily_search import search_web
-from agentic_newsroom.tools.wikipedia_search import search_wikipedia
-from agentic_newsroom.prompts.context import NewsRoomContext
-from agentic_newsroom.llm import get_mini_model
+logger = logging.getLogger(__name__)
 
-from agentic_newsroom.schemas import ResearchState, SearchResult, SearchQuery
-from agentic_newsroom.tools.wikipedia_search import search_wikipedia as wikipedia_search_tool
-from agentic_newsroom.tools.tavily_search import search_web as tavily_search_tool
+from agentic_newsroom.schemas.states import ResearchState
+from agentic_newsroom.schemas.models import SearchResult, ResearchPackage, StoryBrief
+from agentic_newsroom.  tools.tavily_search import perform_search, perform_extract
+from agentic_newsroom.llm.openai import get_mini_model
 
-# Initialize model
-model = get_mini_model()
+# --- Configuration ---
+default_model = get_mini_model()
 
-# Agent-specific persona
-research_assistant_profile = """
-Your name is Sarah. You are the lead researcher for Agentic Newsroom.
-You are a meticulous fact-finder who loves digging into complex topics.
-Your job is to provide the reporter with the raw materials they need: verified facts, primary sources, expert quotes, and key context.
-You never settle for the first result; you triangulate information to ensure accuracy.
-"""
+# You can override this via initial state, but this is the default cap
+DEFAULT_MAX_TURNS = 5
 
-search_query_prompt = f"""You are a research assistant.
 
-{NewsRoomContext.build(research_assistant_profile)}
+# --- Prompts ---
+
+generate_queries_prompt = """You are a senior researcher planning the next step for a deep-dive science magazine feature.
 
 <Story Brief>
-{{story_brief}}
+{story_brief}
+</Story Brief>
+
+<Current Info>
+{context_str}
+</Current Info>
+
+<Task>
+Your goal is to dig deeper to find not just facts, but **stories, characters, and scenes**.
+1. Look at what we know (Current Info).
+2. Identify **Narrative Gaps**: Do we lack the "smell" of the place? Do we need a specific character's voice? Do we need the turning point of the event?
+3. Generate 3 targeted search queries to fill those gaps.
+</Task>
+"""
+
+curate_sources_prompt = """You are a picky editor filtering research sources for a premium science magazine feature.
+
+<Story Brief>
+{story_brief}
 </Story Brief>
 
 <Task>
-Generate search queries to gather information for the story defined in the brief.
-Pay attention to the **Article Type**:
-- **Web Daily**: Focus on the specific recent event/study and immediate context.
-- **Standard Feature**: Cast a wider net for historical context, side characters, and deeper analysis.
+We have performed a broad search. Now we need to spend our extraction budget reading only the BEST sources.
+Select up to 3 URLs that seem most likely to contain **First-Person Accounts, Primary Source Data, or Deep Analysis**.
 </Task>
+<Selection Criteria>
+1. **Prioritize**:
+   - Oral histories / Interviews / Diaries
+   - Official Govt Reports / Archives (Factually dense)
+   - Long-form journalism (The Atlantic, New Yorker style)
+   - Academic monographs (Deep context)
+2. **Avoid**:
+   - Generic travel blogs
+   - Shallow "Top 10 facts" lists
+   - SEO-spam sites
+   - Pinterest / Social Media aggregators
+   - Reddit / Quora and similar unverified sources
+   - PDF files (cannot be extracted)
+   - Audio sources (cannot be extracted)
+   - Video sources (cannot be extracted)
+</Selection Criteria>
 
-<Context>
-Previous queries and results (if any):
-{{context}}
-</Context>
-
-<Instructions>
-1. Analyze the brief and the current state of research.
-2. Generate 3-5 targeted search queries.
-3. If research seems sufficient for the Article Type, set 'is_research_complete' to True.
-</Instructions>
+<Search Results>
+{results_str}
+</Search Results>
 """
 
 
-wikipedia_search_instructions = f"""You are an expert at creating Wikipedia search queries.
+extract_analyze_prompt = """You are a research analyst tasked to extract key facts and quotes from the sources.
+A reporter of scientific magazine will use the facts you extract to write a full feature with strong narrative voices.
 
-{NewsRoomContext.build(research_assistant_profile)}
 
-<StoryBrief>
-{{story_brief}}
-</StoryBrief>
+<Story Brief>
+Here's the story brief:
 
-<Instructions>
-1. Look at the latest research question or topic in the context.
-2. Generate a **simple, direct query** targeting a Wikipedia article title or main topic.
-3. Wikipedia search works best with:
-   - Single entities or concepts: "Socotra", "Dracaena cinnabari", "Dragon blood tree"
-   - Proper nouns: place names, species names, historical events
-   - 1-4 words maximum
-</Instructions>
-"""
-
-web_search_instructions = f"""You are an expert Search Query Optimizer.
-
-{NewsRoomContext.build(research_assistant_profile)}
-
-<StoryBrief>
-{{story_brief}}
-</StoryBrief>
-
-<Instructions>
-1. Look at the latest research question or topic provided in the context.
-2. Formulate a specific, keyword-rich query that is likely to yield high-quality results.
-3. Avoid conversational language (e.g., "Tell me about...") and focus on entities and keywords.
-</Instructions>
-"""
-
-collect_material_instructions = f"""You are a Research Assistant analyzing search results.
-
-{NewsRoomContext.build(research_assistant_profile)}
-
-<StoryBrief>
-{{story_brief}}
-</StoryBrief>
+{story_brief}
+</Story Brief>
 
 <Task>
-Your primary task is to process the raw search results and extract relevant information.
-You must also critically evaluate if we have enough information to write the article based on its **Article Type**.
+We have extracted full text from several sources.
+1. Read the text below.
+2. Extract KEY FACTS, QUOTES, and DATA POINTS in verbatim that help write the story. (check the Important section for more details)
+3. Ignore navigation, links, images, ads, or irrelevant fluff.
+4. For every item you extract, you MUST preserve the Source URL.
 </Task>
 
-<Sufficiency Criteria>
-**Web Daily**:
-- COMPLETE when you have the core event/study facts AND 1-2 distinct sources.
-- Do NOT go down deep rabbit holes. Fast and factual.
+<Important>
+Pay special attention to quotes the reporter may use in the article.
+These quotes must be in verbatim and attributed back to the source.
+</Important>
 
-**Standard Feature**:
-- COMPLETE when you have the core facts + historical context + "color" (descriptive details/scenes) + diverse perspectives.
-- We need enough material to build a narrative arc, not just a list of facts.
-</Sufficiency Criteria>
+<Analysis Completion Criteria>
+You're conducting a deep investigation. Do NOT mark research as complete unless:
+1. You have at least 5 distinct high-quality sources (primary sources, interviews, or academic papers).
+2. You have found specific personal quotes or anecdotes (narrative color).
+3. You have covered the full timeline mentioned in the Brief.
+If any of these are missing, set is_complete=False so we keep searching.
+</Analysis Completion Criteria>
 
-<Instructions>
-1. **Extract Material**: Review the raw search results. Extract key facts, quotes, and figures into structured items.
-2. **Evaluate Sufficiency**: Compare the TOTAL information gathered so far (including previous turns) against the Story Brief and the **Sufficiency Criteria** above.
-3. **Decision**:
-   - If the material matches the Article Type requirements, mark as COMPLETE.
-   - If important questions remain unanswered or the material is too thin for the type, mark as INCOMPLETE.
-</Instructions>
+<Extracted Content>
+{content_str}
+</Extracted Content>
 """
 
-def generate_queries(state: ResearchState):
-    """Generate search queries based on the story brief."""
-    
-    story_brief = state["story_brief"]
-    context = state.get("context", [])
-    current_turn = state.get("current_turn", 0)
+# --- Structured Outputs ---
+class Queries(BaseModel):
+    queries: List[str]
 
-    # Generate search queries
-    system_msg = search_query_prompt.format(
-        story_brief=story_brief.model_dump_json(),
-        context="\n".join([msg.content for msg in context if isinstance(msg, AIMessage)])
+class UrlSelection(BaseModel):
+    urls: List[str]
+    reasoning: str
+
+class ExtractedInfo(BaseModel):
+    new_items: List[SearchResult]
+    is_complete: bool
+    summary_of_findings: str
+
+
+# --- Nodes ---
+
+from langchain_core.runnables import RunnableConfig
+
+def generate_queries_node(state: ResearchState, config: RunnableConfig = None):
+    current_turn = state.get("current_turn", 0) + 1
+    logger.info(f"→ generate_queries (turn {current_turn})")
+
+    brief = state["story_brief"]
+    # Grab only 5 last messages from the context for short-term memory
+    # Since this is called in a loop it's assumed that messages older than 5 are not relevant
+    context_msgs = state.get("context", [])
+    context_str = "\n".join([m.content for m in context_msgs[-5:]])
+
+    # Handle configuration
+    configuration = config.get("configurable", {}) if config else {}
+    model = configuration.get("model", default_model)
+
+    system_msg = generate_queries_prompt.format(
+        story_brief=brief.model_dump_json(indent=2),
+        context_str=context_str or "No research done yet."
     )
-    
-    response = model.invoke([SystemMessage(content=system_msg)] + context)
+
+    # Generate
+    structured_model = model.with_structured_output(Queries)
+    res = structured_model.invoke([SystemMessage(content=system_msg)])
+
+    logger.info(f"  Generated {len(res.queries)} queries")
+    logger.debug(f"  Queries: {res.queries}")
 
     return {
-        "context": [response],
-        "current_turn": current_turn + 1
+        "queries": res.queries,
+        "current_turn": current_turn
     }
 
-def search_web(state: ResearchState):
-    """Search the web using Tavily based on the conversation context."""
-    
-    story_brief = state["story_brief"]
-    context = state.get("context", [])
-    
-    # Generate query using general search instructions
-    structured_model = model.with_structured_output(SearchQuery)
-    system_msg = SystemMessage(
-        content=web_search_instructions.format(story_brief=story_brief.model_dump_json())
-    )
-    search_query = structured_model.invoke([system_msg] + context)
-    
-    # Execute search using the tool (handles both search and formatting)
-    try:
-        formatted_docs = tavily_search_tool(search_query.search_query, max_results=3)
-    except Exception as e:
-        return {"context": [f"Error performing web search: {str(e)}"]}
-    
-    return {"context": [formatted_docs]}
+def search_node(state: ResearchState):
+    logger.info("→ search_web")
+    queries = state.get("queries", [])
+    logger.debug(f"  Searching for {len(queries)} queries")
 
-def search_wikipedia(state: ResearchState):
-    """Retrieve docs from Wikipedia based on the conversation context."""
-    
-    story_brief = state["story_brief"]
-    context = state.get("context", [])
-    
-    # Generate a structured search query from the context
-    # Use Wikipedia-specific instructions
-    structured_model = model.with_structured_output(SearchQuery)
-    system_msg = SystemMessage(
-        content=wikipedia_search_instructions.format(story_brief=story_brief.model_dump_json())
-    )
-    search_query = structured_model.invoke([system_msg] + context)
-    
-    # Execute search using the tool
-    try:
-        formatted_search_docs = wikipedia_search_tool(search_query.search_query, max_docs=2)
-    except Exception as e:
-        return {"context": [f"Error performing Wikipedia search: {str(e)}"]}
-    
-    return {"context": [formatted_search_docs]}
+    raw_results = perform_search(queries)
 
-def collect_material(state: ResearchState):
-    """Process search results, extract structured data, and decide if research is complete."""
-    
-    story_brief = state["story_brief"]
-    context = state.get("context", [])
-    
-    # Define the structure for the LLM's analysis
-    class ResearchEvaluation(BaseModel):
-        new_material: list[SearchResult] = Field(
-            description="Relevant facts and information extracted from the latest search results"
-        )
-        is_complete: bool = Field(
-            description="True if the gathered information is sufficient to answer the research questions, False if more research is needed"
-        )
-        reasoning: str = Field(
-            description="Brief explanation of why research is complete or what is still missing"
-        )
-
-    system_msg = SystemMessage(
-        content=collect_material_instructions.format(
-            story_brief=story_brief.model_dump_json()
-        )
-    )
-    
-    structured_model = model.with_structured_output(ResearchEvaluation)
-    evaluation = structured_model.invoke([system_msg] + context)
-    
-    # Create a summary message for the context
-    summary_msg = (
-        f"Collected {len(evaluation.new_material)} new items.\n"
-        f"Status: {'Complete' if evaluation.is_complete else 'Continuing'}\n"
-        f"Reasoning: {evaluation.reasoning}"
-    )
-    
-    # The 'search_results' key will APPEND to the existing list because of operator.add in schema
+    logger.info(f"  Found {len(raw_results)} raw results")
     return {
-        "search_results": evaluation.new_material,
-        "context": [AIMessage(content=summary_msg)],
-        "is_research_complete": evaluation.is_complete
+        "raw_search_results": raw_results
     }
 
-def should_continue(state: ResearchState) -> Literal["generate_queries", END]:
-    """Decide whether to continue research or end."""
-    
-    # Check loop limits
+def curate_node(state: ResearchState, config: RunnableConfig = None):
+    logger.info("→ curate_urls")
+
+    brief = state["story_brief"]
+    raw = state.get("raw_search_results", [])
+
+    if not raw:
+        logger.warning("  No raw results to curate")
+        return {"urls_to_extract": []}
+
+    logger.debug(f"  Curating from {len(raw)} raw results")
+
+    # Format snippets for LLM
+    results_str = ""
+    for r in raw:
+        # r is a dictionary representing one search result from Tavily e.g., {'url': '...', 'title': '...', 'content': '...'}).
+        results_str += f"- URL: {r.get('url')}\n  Title: {r.get('title')}\n  Snippet: {r.get('content')}\n\n"
+
+    # Handle configuration
+    configuration = config.get("configurable", {}) if config else {}
+    model = configuration.get("model", default_model)
+
+    system_msg = curate_sources_prompt.format(
+        story_brief=brief.model_dump_json(indent=2),
+        results_str=results_str
+    )
+
+    structured_model = model.with_structured_output(UrlSelection)
+    selection = structured_model.invoke([SystemMessage(content=system_msg)])
+
+    logger.info(f"  Selected {len(selection.urls)} URLs for extraction")
+    logger.debug(f"  Reasoning: {selection.reasoning}")
+
+    return {
+        "urls_to_extract": selection.urls
+    }
+
+def extract_analyze_node(state: ResearchState, config: RunnableConfig = None):
+    logger.info("→ extract_analyze")
+
+    brief = state["story_brief"]
+    urls = state.get("urls_to_extract", [])
+
+    logger.debug(f"  Extracting content from {len(urls)} URLs")
+    extracted_data = perform_extract(urls)
+
+    # Format for analysis
+    content_str = ""
+    for data in extracted_data:
+        # data is dictionary representing one search result from Tavily e.g., {'url': '...', 'title': '...', 'content': '...'}).
+        raw_content = data.get('raw_content', '')
+        # Truncate massive pages to avoid token limits
+        content_str += f"--- SOURCE: {data.get('url')} ---\n{raw_content[:10000]}\n\n"
+
+    # Handle configuration
+    configuration = config.get("configurable", {}) if config else {}
+    model = configuration.get("model", default_model)
+
+    system_msg = extract_analyze_prompt.format(
+        story_brief=brief.model_dump_json(indent=2),
+        content_str=content_str
+    )
+
+    structured_model = model.with_structured_output(ExtractedInfo)
+    analysis = structured_model.invoke([SystemMessage(content=system_msg)])
+
+    logger.info(f"  Extracted {len(analysis.new_items)} new items")
+    logger.info(f"  Research complete: {analysis.is_complete}")
+    logger.debug(f"  Summary: {analysis.summary_of_findings}")
+
+    # Add context history so next query generations knows what we found
+    update_msg = f"Turn {state['current_turn']} Findings: {analysis.summary_of_findings}"
+
+    return {
+        "search_results": analysis.new_items,
+        "is_complete": analysis.is_complete,
+        "context": [AIMessage(content=update_msg)],
+        "is_research_complete": analysis.is_complete # Sync with state schema
+    }
+
+def finalize_research_node(state: ResearchState):
+    """Deduplicate and wrap in ResearchPackage."""
+    logger.info("→ finalize_research")
+
+    raw = state.get("search_results", [])
+    logger.debug(f"  Processing {len(raw)} raw search results")
+
+    merged_map = {}
+
+    for r in raw:
+        if r.source not in merged_map:
+            merged_map[r.source] = SearchResult(source=r.source, content=r.content, relevance=r.relevance)
+        else:
+            merged_map[r.source].content += "\n\n" + r.content
+
+    final_list = list(merged_map.values())
+
+    package = ResearchPackage(results=final_list)
+
+    # Save artifact
+    brief = state.get("story_brief")
+    package.save(brief.slug)
+
+    logger.info(f"  Finalized research package with {len(final_list)} unique sources")
+
+    return {"research_package": package}
+
+def check_loop(state: ResearchState) -> Literal["generate_queries", "finalize_research"]:
+    """Decide if we should continue checking or stop."""
     current_turn = state.get("current_turn", 0)
-    max_turns = state.get("max_num_turns", 3)
-    
-    if current_turn >= max_turns:
-        return END
-    
-    # Check LLM decision
-    if state.get("is_research_complete", False):
-        return END
-        
+    max_turns = state.get("max_turns", DEFAULT_MAX_TURNS)
+    is_complete = state.get("is_complete") or state.get("is_research_complete")
+
+    if is_complete or current_turn >= max_turns:
+        reason = "complete" if is_complete else f"max turns ({max_turns})"
+        logger.info(f"→ check_loop: Ending research ({reason})")
+        return "finalize_research" # GO TO FINALIZER
+
+    logger.info(f"→ check_loop: Continuing research (turn {current_turn}/{max_turns})")
     return "generate_queries"
+
 
 def build_research_assistant_graph():
     builder = StateGraph(ResearchState)
 
     # Add Nodes
-    builder.add_node("generate_queries", generate_queries)
-    builder.add_node("search_web", search_web)
-    builder.add_node("search_wikipedia", search_wikipedia)
-    builder.add_node("collect_material", collect_material)
+    builder.add_node("generate_queries", generate_queries_node)
+    builder.add_node("search_web", search_node)
+    builder.add_node("curate_urls", curate_node)
+    builder.add_node("extract_analyze", extract_analyze_node)
+    builder.add_node("finalize_research", finalize_research_node) 
 
     # Add Edges
     builder.add_edge(START, "generate_queries")
-
-    # Parallel execution: generate_queries -> both search nodes
     builder.add_edge("generate_queries", "search_web")
-    builder.add_edge("generate_queries", "search_wikipedia")
+    builder.add_edge("search_web", "curate_urls")
+    builder.add_edge("curate_urls", "extract_analyze")
 
-    # Fan-in: both search nodes -> collect_material
-    builder.add_edge("search_web", "collect_material")
-    builder.add_edge("search_wikipedia", "collect_material")
-
-    # Conditional Loop
+    # Conditional Edge
     builder.add_conditional_edges(
-        "collect_material", 
-        should_continue, 
-        ["generate_queries", END]
+        "extract_analyze", 
+        check_loop,
+        ["generate_queries", "finalize_research"] 
     )
+
+    # Final Edge
+    builder.add_edge("finalize_research", END)
 
     return builder.compile()
 
 
 if __name__ == "__main__":
     import argparse
-    from agentic_newsroom.utils.files import load_story_brief, save_research_package
-    from agentic_newsroom.schemas import ResearchPackage
+    from agentic_newsroom.utils.newsroom_logging import setup_logging
+
+    setup_logging()
 
     def main():
+
         parser = argparse.ArgumentParser(description="Research Assistant Agent")
         parser.add_argument("slug", help="The article slug")
+        parser.add_argument("--turns", type=int, default=DEFAULT_MAX_TURNS, help="Max research turns")
         args = parser.parse_args()
 
         slug = args.slug
         print(f"🔍 Research Assistant: Researching '{slug}'...")
+        logger.info(f"Starting research assistant for slug: {slug}")
 
         try:
-            story_brief = load_story_brief(slug)
+            story_brief = StoryBrief.load(slug)
+            logger.info(f"Loaded story brief: {story_brief.topic}")
         except FileNotFoundError:
             print(f"❌ Story Brief not found for slug '{slug}'. Run assignment_editor.py first.")
+            logger.error(f"Story brief not found for slug: {slug}")
             return
 
         # Create graph
+        logger.info("Building research assistant graph")
         graph = build_research_assistant_graph()
 
         # Run graph
         initial_state = {
             "story_brief": story_brief,
-            "max_num_turns": 3,
+            "max_turns": args.turns,
             "current_turn": 0,
             "context": [],
             "search_results": []
         }
-        
-        result = graph.invoke(initial_state)
-        
-        # Extract research package
-        # The graph returns 'search_results' list, we need to wrap it
-        research_results = result.get("search_results", [])
-        pkg = ResearchPackage(results=research_results)
-        
-        path = save_research_package(pkg, slug)
-        
-        print(f"✅ Research Complete!")
-        print(f"   Items: {len(pkg.results)}")
-        print(f"   Saved to: {path}")
+
+        logger.info(f"Starting research workflow (max_turns={args.turns})")
+
+        # Increase recursion limit to support many turns
+        config = {"recursion_limit": 100}
+        result = graph.invoke(initial_state, config=config)
+
+        # Save package
+        if result.get("research_package"):
+            # package.save(slug) is handled in finalize_research_node
+            print(f"✅ Research Complete!")
+            print(f"   Items: {len(result['research_package'].results)}")
+            print(f"   Saved to artifacts/{slug}/")
+            logger.info(f"Research complete with {len(result['research_package'].results)} items")
+        else:
+            print("❌ Research failed to produce a package.")
+            logger.error("Research workflow failed to produce a package")
 
     main()

@@ -1,75 +1,66 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import logging
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import START, END, StateGraph
 
-from agentic_newsroom.schemas import NewsroomState, StoryBrief
-from agentic_newsroom.prompts.context import NewsRoomContext
-from agentic_newsroom.llm import get_reasoning_model
+from agentic_newsroom.schemas.models import StoryBrief
+from agentic_newsroom.schemas.states import NewsroomState
+from agentic_newsroom.prompts.common import article_types
+from agentic_newsroom.llm.openai import get_smart_model
 
-# Initialize model
-model = get_reasoning_model()
+logger = logging.getLogger(__name__)
 
-# Agent-specific persona
-assignment_editor_profile = """
-Your name is Robert. You are the Assignment Editor for Agentic Newsroom.
-You have more than twenty years of experience shaping coverage for major science and geography magazines. 
-Your role is to identify stories worth telling and define the editorial direction before reporting begins. 
-You think like a strategist: every pitch, idea, and angle must serve Agentic Newsroom's mission of curiosity, scientific literacy, and wonder.
+# Initialize model (uses reasoning model in reasoning mode, mini in mini mode)
+default_model = get_smart_model()
 
-You craft clear, actionable story briefs that specify:
-- the scope and angle
-- the required reporting questions
-- the story type (Web Daily or Standard Feature)
-- the intended audience and tone
-- the themes or narrative tension
-
-Your job is to give the reporter a direction that is specific, compelling, achievable, and worth publishing.
-"""
-
-assignment_editor_prompt = f"""You are the Assignment Editor.
-
-{NewsRoomContext.build(assignment_editor_profile)}
+assignment_editor_prompt = """You are the Assignment Editor for The Agentic Newsroom.
 
 <Task>
 You are given a an idea of an article and your task is to turn it into a story brief.
-It's important that the brief matches the magazine's tone and profile.
 </Task>
+
+{article_types}
 
 <Instructions>
 When you receive a article idea, follow these steps:
 
-1. Think carefully what Agentic Newsroom's audience would want to know about this article and phrase a clear topic based on it
-2. Come up with a clear angle that will make the a interesting and engaging for the readers
-3. Select the appropriate **Article Type** based on the depth/scope of the idea:
-   - "Web Daily (400-700 words)" for specific events or studies.
-   - "Standard Feature (800-1200 words)" for broader narratives or trends.
-4. Think about the key questions that the article should answer
+1. Think carefully what the audience would want to know about this article and phrase a clear topic based on it
+2  Come up with a clear angle that will make the a interesting and engaging for the readers
+3. Think about the key questions that the article should answer
+4. Estimate the length of the article using the article types definition defined above
 </Instructions>
 
-<Output Format>
-When you have come up with the story brief, output it in the following format:
- - Topic
- - Angle
- - Article Type
- - Key questions
-</Output Format>
-"""
+""".format(article_types=article_types)
 
-def create_story_brief(state: NewsroomState):
-    
+def create_story_brief(state: NewsroomState, config: RunnableConfig = None):
+    logger.info("→ create_story_brief")
+
+    article_idea = state['article_idea']
+    logger.debug(f"  Article idea: {article_idea[:100]}...")  # Truncate for logging
+
+    configuration = config.get("configurable", {}) if config else {}
+    model = configuration.get("model", default_model)
+
     system_msg = SystemMessage(content=assignment_editor_prompt)
-
     structured_model = model.with_structured_output(StoryBrief)
 
     response = structured_model.invoke([
         system_msg,
-        HumanMessage(content=f"Write a story brief for the following article idea: {state['article_idea']}")
+        HumanMessage(content=f"Write a story brief for the following article idea: {article_idea}")
     ])
 
+    story_brief = response
+    story_brief.save(story_brief.slug)
+
+    logger.info(f"  Created story brief: {story_brief.topic}")
+    logger.info(f"  Article type: {story_brief.article_type}")
+    logger.info(f"  Slug: {story_brief.slug}")
+
     return {
-        "story_brief": response
+        "story_brief": story_brief
     }
 
 def build_assignment_editor_graph():
@@ -86,40 +77,43 @@ def build_assignment_editor_graph():
 
 
 if __name__ == "__main__":
-    import sys
     import argparse
-    from agentic_newsroom.utils.slugs import generate_article_slug
-    from agentic_newsroom.utils.files import save_story_brief
+    from agentic_newsroom.utils.newsroom_logging import setup_logging
+
+    setup_logging()
 
     def main():
+
         parser = argparse.ArgumentParser(description="Assignment Editor Agent")
         parser.add_argument("article_idea", help="The article idea to process")
         args = parser.parse_args()
 
         article_idea = args.article_idea
         print(f"📰 Assignment Editor: Processing idea '{article_idea}'...")
+        logger.info(f"Starting assignment editor for article idea: {article_idea[:50]}...")
 
         # Create graph
+        logger.info("Building assignment editor graph")
         graph = build_assignment_editor_graph()
 
         # Run graph
         initial_state = {
             "article_idea": article_idea,
         }
+
+        logger.info("Starting assignment editor workflow")
         result = graph.invoke(initial_state)
-        
+
         story_brief = result.get("story_brief")
-        
+
         if story_brief:
-            # Generate slug and save
-            slug = generate_article_slug(story_brief.topic)
-            path = save_story_brief(story_brief, slug)
-            
             print(f"✅ Story Brief created!")
             print(f"   Topic: {story_brief.topic}")
-            print(f"   Slug: {slug}")
-            print(f"   Saved to: {path}")
+            print(f"   Slug: {story_brief.slug}")
+            print(f"   Saved to artifacts/{story_brief.slug}/")
+            logger.info(f"Assignment editor complete. Created story brief: {story_brief.slug}")
         else:
             print("❌ Failed to generate story brief.")
+            logger.error("Assignment editor workflow failed to produce story brief")
 
     main()

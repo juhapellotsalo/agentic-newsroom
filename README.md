@@ -8,13 +8,22 @@ Agentic Newsroom simulates a magazine editorial workflow where specialized AI ag
 
 ## Agents
 
-The system includes five specialized agents:
+The system includes six specialized agents:
 
 1. **Assignment Editor** - Transforms raw story ideas into structured story briefs with clear angles and research questions
 2. **Research Assistant** - Conducts iterative web and Wikipedia research to gather factual material
-3. **Reporter** - Writes article drafts based on story briefs and research packages
-4. **Editor** - Refines and polishes drafts into final articles
-5. **Editor-in-Chief** - Makes final publication decisions with approval or revision feedback
+3. **Reporter** - Writes article drafts based on story briefs and research packages, with fact and style review passes
+4. **Copy Editor** - Refines and polishes drafts into final articles with title and subtitle
+5. **Graphic Desk** - Generates hero images for articles using AI image generation
+6. **Editor-in-Chief** - Reviews articles against magazine guardrails and approves for publication
+
+## Workflow
+
+The full pipeline flows through all agents sequentially:
+
+```
+START → Assignment Editor → Research Assistant → Reporter → Copy Editor → Graphic Desk → Editor-in-Chief → END
+```
 
 ## Architecture
 
@@ -22,20 +31,26 @@ Built with:
 - **LangGraph** - Orchestrates multi-agent workflows with state management
 - **LangChain** - Provides LLM integrations and structured outputs
 - **Pydantic** - Enforces typed data schemas throughout the pipeline
+- **OpenAI** - Powers both text generation and image generation
+
+See [docs/architecture.md](docs/architecture.md) for detailed diagrams of each agent's graph.
 
 ## Project Structure
 
 ```
 agentic-newsroom/
 ├── src/agentic_newsroom/
-│   ├── agents/          # Individual agent implementations
-│   ├── workflows/       # Multi-agent workflow orchestration
-│   ├── schemas.py       # Pydantic models for state and outputs
-│   ├── prompts/         # System prompts and guidelines
-│   └── tools/           # Research tools (Wikipedia, web search)
-├── notebooks/           # Jupyter notebooks for agent development
-│   └── [*_agent.ipynb]  # Frozen notebooks for each agent
-└── examples/            # Example article outputs (gitignored)
+│   ├── agents/           # Individual agent implementations
+│   ├── workflows/        # Multi-agent workflow orchestration
+│   ├── schemas/          # Pydantic models for state and outputs
+│   │   ├── models.py     # Data models (StoryBrief, DraftPackage, etc.)
+│   │   └── states.py     # Agent state definitions
+│   ├── prompts/          # System prompts and guidelines
+│   ├── llm/              # LLM model configuration
+│   └── utils/            # Helper utilities
+├── notebooks/            # Jupyter notebooks for agent development
+├── examples/             # Example article outputs
+└── artifacts/            # Generated article artifacts (gitignored)
 ```
 
 ## Getting Started
@@ -53,13 +68,28 @@ poetry install
 ```
 
 2. Add your API keys to `.env`:
-   - OpenAI API key
-   - Optional: LangSmith API key (for tracing)
+```bash
+OPENAI_API_KEY=your-openai-api-key
+TAVILY_API_KEY=your-tavily-api-key
+
+# Optional: LangSmith for tracing
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your-langsmith-api-key
+LANGSMITH_PROJECT=agentic-newsroom
+```
 
 ### Usage
 
 #### Running the Full Workflow
 
+From the command line:
+```bash
+python main.py "The mysterious dragon blood trees of Socotra Island"
+```
+
+**Note:** A full workflow run uses approximately 150,000 tokens and costs $0.30-0.50 USD.
+
+Or programmatically:
 ```python
 from agentic_newsroom.workflows.newsroom_workflow import build_newsroom_workflow
 
@@ -74,9 +104,10 @@ story_brief = result["story_brief"]
 research_package = result["research_package"]
 draft_package = result["draft_package"]
 final_article = result["final_article"]
-editor_decision = result["editor_decision"]
+hero_image_path = result["hero_image_path"]
+approval = result["approval"]
 
-print(final_article.final_article)
+print(final_article.to_markdown())
 ```
 
 #### Running Individual Agents
@@ -88,68 +119,68 @@ Each agent can be run independently from the command line. Agents form a pipelin
 python -m agentic_newsroom.agents.assignment_editor "Deep sea hydrothermal vents"
 
 # 2. Research Assistant - Gathers material (uses story brief)
-python -m agentic_newsroom.agents.research_assistant deep_sea_hydrothermal_vents
+python -m agentic_newsroom.agents.research_assistant deep-sea-hydrothermal-vents
 
 # 3. Reporter - Writes draft (uses story brief + research)
-python -m agentic_newsroom.agents.reporter deep_sea_hydrothermal_vents
+python -m agentic_newsroom.agents.reporter deep-sea-hydrothermal-vents
 
-# 4. Editor - Polishes draft (uses draft package)
-python -m agentic_newsroom.agents.editor deep_sea_hydrothermal_vents
+# 4. Copy Editor - Polishes draft into final article
+python -m agentic_newsroom.agents.copy_editor deep-sea-hydrothermal-vents
 
-# 5. Editor-in-Chief - Makes publication decision (uses story brief + final article)
-python -m agentic_newsroom.agents.editor_in_chief deep_sea_hydrothermal_vents
+# 5. Graphic Desk - Generates hero image
+python -m agentic_newsroom.agents.graphic_desk deep-sea-hydrothermal-vents
+
+# 6. Editor-in-Chief - Reviews and approves for publication
+python -m agentic_newsroom.agents.editor_in_chief deep-sea-hydrothermal-vents
+```
+
+Most agents support a `--mini` flag to use the faster/cheaper mini model:
+```bash
+python -m agentic_newsroom.agents.reporter deep-sea-hydrothermal-vents --mini
 ```
 
 Each agent:
 - Takes either an article idea (Assignment Editor) or a slug (all others)
-- Loads required inputs from `tmp/[slug]/`
-- Saves outputs to `tmp/[slug]/`
+- Loads required inputs from `artifacts/[slug]/`
+- Saves outputs to `artifacts/[slug]/`
 - Can be imported and used programmatically via `build_*_graph()` functions
-
-## Notebooks
-
-The `notebooks/` directory contains Jupyter notebooks used during initial development. These are **frozen snapshots** with inlined dependencies, kept as historical reference and quick testing tools. They are intentionally not kept in sync with the production codebase.
-
-For actual use, import agents from `src/agentic_newsroom/agents/` as shown above.
 
 ## Configuration
 
 ### LLM Models
 
-The system works with OpenAI model.
-
-Default models:
-- Assignment Editor: GPT-5.1 (reasoning: medium)
-- Research Assistant: GPT-5-mini (reasoning: minimal)
-- Reporter: GPT-5.1 (reasoning: medium)
-- Editor: GPT-5.1 (reasoning: medium)
-- Editor-in-Chief: GPT-5.1 (reasoning: medium)
+The system uses OpenAI models configured in `src/agentic_newsroom/llm/openai.py`:
+- **Smart model** - Used for creative/complex tasks (writing, editing)
+- **Mini model** - Used for analytical tasks (research, review)
 
 ### Magazine Profile
 
-The editorial voice and standards are defined in `src/agentic_newsroom/prompts/common.py`. Customize these to match your publication's style.
-
-## Development
-
-### Code Formatting
-
-```bash
-poetry run black src/
-poetry run ruff check src/
-```
+The editorial voice and standards are defined in `src/agentic_newsroom/prompts/common.py`:
+- `magazine_profile` - Publication's mission and voice
+- `magazine_guardrails` - Editorial standards and policies
+- `article_types` - Definitions for Web Daily (400-700 words) and Full Feature (1500-2000 words)
 
 ## Output
 
-Generated articles and intermediate artifacts are saved to `tmp/` (gitignored):
+Generated articles and intermediate artifacts are saved to `artifacts/` (gitignored):
 
 ```
-tmp/
+artifacts/
 └── story-slug/
     ├── story_brief.json
     ├── research_package.json
     ├── draft_package.json
     ├── final_article.json
-    └── editor_decision.json
+    ├── publication_approval.json
+    ├── reporter/              # Reporter intermediate files
+    │   ├── 1_initial_draft.md
+    │   ├── 2_fact_review.md
+    │   ├── 3_after_fact_revision.md
+    │   ├── 4_style_review.md
+    │   └── 5_after_style_revision.md
+    └── graphics/              # Generated images
+        ├── hero_prompt.txt
+        └── hero_image.png
 ```
 
 ## License

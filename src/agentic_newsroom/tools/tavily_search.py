@@ -5,99 +5,71 @@ This module provides a wrapper around the Tavily search API
 for performing web searches during research.
 """
 
-import json
-from typing import List, Dict, Any
-from langchain_community.tools.tavily_search import TavilySearchResults
+import os
+from typing import List, Dict, Any, Union
+from tavily import TavilyClient
 
+def perform_search(queries: List[str]) -> List[dict]:
+     """Search Tavily and return raw results (url + title + content snippet)."""
+     api_key = os.getenv("TAVILY_API_KEY")
+     if not api_key:
+         raise Exception("TAVILY_API_KEY environment variable is not set")
+     tavily = TavilyClient(api_key=api_key)
 
-def format_tavily_results(search_docs: Any) -> str:
-    """
-    Format Tavily search results into a structured string.
-    
-    This function handles various return formats from the Tavily API
-    and normalizes them into a consistent XML-like format for LLM consumption.
-    
-    Args:
-        search_docs: Raw search results from Tavily (can be string, list, or dict)
-    
-    Returns:
-        Formatted string with search results in <Document> tags
-    """
-    formatted_docs = []
-    
-    # Case 1: It's a string (maybe JSON?)
-    if isinstance(search_docs, str):
+     print(f"🔎 Searching for: {queries}")
+     aggregated= []
+     for query in queries:
         try:
-            search_docs = json.loads(search_docs)
-        except:
-            # If it's just a raw string, wrap it
-            formatted_docs.append(f"<Document>\n{search_docs}\n</Document>")
-            search_docs = []  # Clear so we don't loop
-    
-    # Case 2: It's a list
-    if isinstance(search_docs, list):
-        for doc in search_docs:
-            if isinstance(doc, dict):
-                # Standard case: dict with url/content
-                url = doc.get("url", "unknown")
-                content = doc.get("content", str(doc))
-                formatted_docs.append(f'<Document href="{url}"/>\n{content}\n</Document>')
-            elif isinstance(doc, str):
-                # Fallback: list of strings
-                formatted_docs.append(f"<Document>\n{doc}\n</Document>")
-            else:
-                # Fallback: unknown object
-                formatted_docs.append(f"<Document>\n{str(doc)}\n</Document>")
-    
-    return "\n\n---\n\n".join(formatted_docs)
+            resp = tavily.search(query, search_depth="advanced", max_results=3)
+            results = resp.get("results", [])
+            aggregated.extend(results)
+        except Exception as e:
+            print(f"Search failed for '{query}': {e}")
+     
+     return aggregated
 
-
-def search_web(query: str, max_results: int = 3) -> str:
-    """
-    Perform a web search using Tavily and return formatted results.
+def perform_extract(urls: List[str]) -> List[dict]:
+    """Scrape full content from URLs."""
+    if not urls:
+        return []
     
-    Args:
-        query: Search query string
-        max_results: Maximum number of results to return (default: 3)
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        raise Exception("TAVILY_API_KEY environment variable is not set")
+    tavily = TavilyClient(api_key=api_key)
     
-    Returns:
-        Formatted search results as a string
-    
-    Raises:
-        Exception: If the search fails
-    """
-    tavily_tool = TavilySearchResults(max_results=max_results)
-    
+    print(f"🌐 Extracting from {len(urls)} URLs...")
     try:
-        search_docs = tavily_tool.invoke({"query": query})
-        return format_tavily_results(search_docs)
+        # extract_depth="advanced" handles popups/layouts better if available, standard is fine too
+        resp = tavily.extract(urls=urls)
+        return resp.get("results", [])
     except Exception as e:
-        raise Exception(f"Error performing web search: {str(e)}")
-
+        print(f"Extract failed: {e}")
+        return []
 
 if __name__ == "__main__":
     from pathlib import Path
     from dotenv import load_dotenv
     
     # Load environment variables from project root
-    # This file is in src/agentic_newsroom/tools/, so go up 3 levels to reach project root
     project_root = Path(__file__).parent.parent.parent.parent
     env_path = project_root / '.env'
-    
     if env_path.exists():
         load_dotenv(dotenv_path=env_path)
-        print(f"✓ Loaded .env from: {env_path}\n")
     else:
-        print(f"⚠️  Warning: .env file not found at {env_path}\n")
-    
-    # Example search query for testing
-    test_query = "ancient Mesopotamian clay tablet maps 1899 discovery"
-    
-    print(f"Searching for: {test_query}")
-    print("=" * 80)
-    
-    try:
-        results = search_web(test_query, max_results=3)
-        print(results)
-    except Exception as e:
-        print(f"Search failed: {e}")
+        print("Warning: .env file not found.")
+
+    print("--- Testing Search ---")
+    results = perform_search(["Dyatlov Pass incident theories"])
+    print(f"Found {len(results)} results")
+    if results:
+        print(f"First result title: {results[0].get('title')}")
+
+    print("\n--- Testing Extract ---")
+    if results:
+        url = results[0].get("url")
+        if url:
+            extracted = perform_extract([url])
+            print(f"Extracted {len(extracted)} items")
+            if extracted:
+                 print(f"Content snippet: {extracted[0].get('raw_content', '')[:100]}...")

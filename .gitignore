@@ -43,8 +43,12 @@ Thumbs.db
 # Project specific
 output/
 tmp/
-examples/
 *.log
 
 # Backup
 .git.backup/
+
+# AI dev
+CLAUDE.md
+
+artifacts/
