@@ -35,6 +35,16 @@ graphic_desk_prompt = """You are a photo editor. Your task is to generate a mini
 - **Style:** Append the following technical tags to the end: ", 4k, professional photography, cinematic lighting. --ar 16:9"
 </Constraints>
 
+<People in Images>
+Follow the PEOPLE INSTRUCTION provided in the article context below. This instruction comes from the story brief
+and tells you exactly how to handle people in the image:
+- If it says to not include people, generate an image without any people.
+- If it describes specific people to include, incorporate them naturally into the scene while keeping the style neutral and realistic.
+
+Example with "Include a scientist examining samples":
+"A realistic photograph of a scientist examining samples in the Amazon rainforest, 4k, professional photography, cinematic lighting. --ar 16:9"
+</People in Images>
+
 <Output Format>
 Return ONLY the prompt string.
 
@@ -64,11 +74,14 @@ def generate_image_prompt(state: GraphicDeskState, config: RunnableConfig = None
     model = configuration.get("model", default_model)
 
     article_context = f"""Title: {final_article.title}
-            Subtitle: {final_article.subtitle or 'None'}
-            Topic: {story_brief.topic}
-            Article:
-            {final_article.article}
-    """
+Subtitle: {final_article.subtitle or 'None'}
+Topic: {story_brief.topic}
+Article:
+{final_article.article}
+
+PEOPLE INSTRUCTION: {story_brief.people_in_graphics}
+"""
+    logger.info(f"  People in graphics: {story_brief.people_in_graphics}")
 
     messages = [
         SystemMessage(content=graphic_desk_prompt),
@@ -118,7 +131,7 @@ def generate_hero_image(state: GraphicDeskState, config: RunnableConfig = None):
     # Get config options with defaults
     configuration = config.get("configurable", {}) if config else {}
     image_model = configuration.get("image_model", "gpt-image-1.5")
-    image_quality = configuration.get("image_quality", "medium")
+    image_quality = configuration.get("image_quality", "high")
 
     logger.info(f"  Prompt: {image_prompt}")
     logger.info(f"  Model: {image_model}, Quality: {image_quality}")

@@ -50,6 +50,7 @@ Write a complete article draft based on the Story Brief and Research Material.
 7. No narrative quotes ("Dr. X said..."). You have no interviews.
 8. Attribute non-obvious facts to their sources.
 9. Stick to facts from Research Material only.
+10. No bullet points or lists. Write in flowing narrative prose throughout.
 </Writing Rules>
 
 <Voice>

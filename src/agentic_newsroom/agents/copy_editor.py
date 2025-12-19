@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
+from datetime import date
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import START, END, StateGraph
@@ -21,6 +22,8 @@ Weave source citations naturally into prose:
 - "(Bligh's Narrative; court transcripts)" → "as Bligh recorded in his Narrative"
 - "(Smith 2020)" → "Smith's research shows" or "according to Smith"
 - "(Wikipedia)" → remove, this is common knowledge
+
+Convert any bullet points or lists into flowing narrative prose. Magazine articles should read as continuous storytelling, not as enumerated items.
 </Primary Task>
 
 <Secondary>
@@ -60,7 +63,11 @@ def polish_article(state: CopyEditorState, config: RunnableConfig = None):
     structured_model = model.with_structured_output(FinalArticle)
     final_article = structured_model.invoke(messages)
 
+    # Set publication date programmatically
+    final_article.published_date = date.today()
+
     logger.info(f"  Title: {final_article.title}")
+    logger.info(f"  Published date: {final_article.published_date}")
     logger.info(f"  Polish complete: {len(final_article.article.split())} words")
 
     # Save final article to artifacts folder

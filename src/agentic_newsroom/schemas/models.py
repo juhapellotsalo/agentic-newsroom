@@ -1,15 +1,30 @@
+from datetime import date
+from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from agentic_newsroom.schemas.base import NewsroomModel
 
 
+class Category(str, Enum):
+    """Article categories for The Agentic Newsroom."""
+    SCIENCE = "Science"
+    HISTORY = "History"
+    PLANET_EARTH = "Planet Earth"
+    MYSTERY = "Mystery"
+
+
 class StoryBrief(NewsroomModel):
-    
+
     topic: str = Field(..., description="Clear statement of what the story is about")
     angle: str = Field(..., description="The specific approach or perspective to take")
+    category: Category = Field(..., description="The category that best fits the article")
     article_type: str = Field(..., description="The type of article and its target length")
     key_questions: List[str] = Field(..., description="3-5 questions the article should answer")
     slug: str = Field(..., description="Short but descriptive slug for the story")
+    people_in_graphics: str = Field(
+        ...,
+        description="Instructions for people in the hero image. Default: 'Do not include any people in the hero image.' or custom instructions if explicitly requested."
+    )
 
     def to_markdown(self) -> str:
         """Convert StoryBrief to markdown format."""
@@ -18,6 +33,8 @@ class StoryBrief(NewsroomModel):
             "",
             f"**Angle:** {self.angle}",
             "",
+            f"**Category:** {self.category.value}",
+            "",
             f"**Article Type:** {self.article_type}",
             "",
             "## Key Questions",
@@ -25,12 +42,14 @@ class StoryBrief(NewsroomModel):
         ]
         for i, question in enumerate(self.key_questions, 1):
             lines.append(f"{i}. {question}")
-        
+
         lines.extend([
             "",
             f"**Slug:** {self.slug}",
+            "",
+            f"**People in Graphics:** {self.people_in_graphics}",
         ])
-        
+
         return "\n".join(lines)
 
 
@@ -206,9 +225,12 @@ class FinalArticle(NewsroomModel):
     title: str = Field(..., description="The article headline")
     subtitle: Optional[str] = Field(None, description="Optional subtitle or deck")
     article: str = Field(..., description="The article body in markdown (without title)")
+    published_date: Optional[date] = Field(None, description="Publication date, set programmatically")
 
     def to_markdown(self) -> str:
         md = f"# {self.title}\n\n"
+        if self.published_date:
+            md += f"*Published: {self.published_date.strftime('%B %d, %Y')}*\n\n"
         if self.subtitle:
             md += f"*{self.subtitle}*\n\n"
         md += self.article

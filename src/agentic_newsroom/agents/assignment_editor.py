@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 # Initialize model (uses reasoning model in reasoning mode, mini in mini mode)
 default_model = get_smart_model()
 
+article_categories = """<Categories>
+Choose the single best-fit category for the article:
+- Science: Scientific discoveries, research, technology, space, medicine, physics, biology
+- History: Historical events, figures, archaeology, ancient civilizations, historical mysteries
+- Planet Earth: Nature, wildlife, geography, climate, ecosystems, natural wonders, conservation
+- Mystery: Unexplained phenomena, unsolved cases, cryptids, paranormal, strange occurrences
+</Categories>"""
+
 assignment_editor_prompt = """You are the Assignment Editor for The Agentic Newsroom.
 
 <Task>
@@ -24,16 +32,36 @@ You are given a an idea of an article and your task is to turn it into a story b
 
 {article_types}
 
+{article_categories}
+
+<People in Graphics>
+The `people_in_graphics` field controls how people appear in the hero image. This field must ALWAYS be set.
+
+- **Default**: If the article idea does NOT mention anything about people in images, set this field to:
+  "Do not include any people in the hero image."
+
+- **Custom**: If the article idea explicitly requests people in the images (e.g., "for the image show scientists working",
+  "include explorers in the hero image", "the graphic should feature locals"), extract and rephrase that
+  request into clear instructions for the graphic desk.
+
+Examples:
+- No mention of people → "Do not include any people in the hero image."
+- "show a scientist examining the trees" → "Include a scientist examining the trees."
+- "feature local fishermen in the image" → "Include local fishermen in the scene."
+</People in Graphics>
+
 <Instructions>
 When you receive a article idea, follow these steps:
 
 1. Think carefully what the audience would want to know about this article and phrase a clear topic based on it
-2  Come up with a clear angle that will make the a interesting and engaging for the readers
-3. Think about the key questions that the article should answer
-4. Estimate the length of the article using the article types definition defined above
+2. Come up with a clear angle that will make the a interesting and engaging for the readers
+3. Select the category that best fits the article's subject matter
+4. Think about the key questions that the article should answer
+5. Estimate the length of the article using the article types definition defined above
+6. Check if the article idea contains any explicit request for people in the hero image
 </Instructions>
 
-""".format(article_types=article_types)
+""".format(article_types=article_types, article_categories=article_categories)
 
 def create_story_brief(state: NewsroomState, config: RunnableConfig = None):
     logger.info("→ create_story_brief")
@@ -56,6 +84,7 @@ def create_story_brief(state: NewsroomState, config: RunnableConfig = None):
     story_brief.save(story_brief.slug)
 
     logger.info(f"  Created story brief: {story_brief.topic}")
+    logger.info(f"  Category: {story_brief.category.value}")
     logger.info(f"  Article type: {story_brief.article_type}")
     logger.info(f"  Slug: {story_brief.slug}")
 
@@ -109,6 +138,7 @@ if __name__ == "__main__":
         if story_brief:
             print(f"✅ Story Brief created!")
             print(f"   Topic: {story_brief.topic}")
+            print(f"   Category: {story_brief.category.value}")
             print(f"   Slug: {story_brief.slug}")
             print(f"   Saved to artifacts/{story_brief.slug}/")
             logger.info(f"Assignment editor complete. Created story brief: {story_brief.slug}")
